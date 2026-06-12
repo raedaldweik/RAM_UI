@@ -273,9 +273,11 @@ async def _get_token(force_refresh: bool = False) -> str:
 
 
 # ─── HTTP helper ─────────────────────────────────────────────────────
-async def _request(method: str, path: str, *, params: dict | None = None, json: dict | None = None) -> Any:
+async def _request(method: str, path: str, *, params: dict | None = None, json: dict | None = None,
+                   with_response: bool = False) -> Any:
     if MOCK:
-        return await _mock_request(method, path, params=params, json=json)
+        data = await _mock_request(method, path, params=params, json=json)
+        return (data, None) if with_response else data
     if not RAM_API_URL:
         raise RamError(500, "RAM_API_URL is not configured. Set it in backend/.env (see .env.example).")
 
@@ -294,7 +296,8 @@ async def _request(method: str, path: str, *, params: dict | None = None, json: 
         except Exception:
             message = r.text[:300]
         raise RamError(r.status_code, message)
-    return r.json() if r.content else None
+    data = r.json() if r.content else None
+    return (data, r) if with_response else data
 
 
 # ─── Public API ──────────────────────────────────────────────────────
@@ -354,17 +357,40 @@ async def create_query(content: str, *, agent_id: str | None = None,
     # Submit asynchronously and poll: a synchronous POST /query holds one HTTP
     # request open for the whole agent run, which gateways in front of RAM kill
     # with "504 upstream request timeout" on slow queries.
-    body = await _request("POST", "/query", params={"synchronous": "false", "persistent": "true"}, json=payload)
-    query_id = (body or {}).get("id")
+    body, resp = await _request("POST", "/query", params={"synchronous": "false", "persistent": "true"},
+                                json=payload, with_response=True)
+    query_id = _extract_query_id(body, resp)
+    if not query_id and not _query_finished(body):
+        raise RamError(502, "RAM accepted the query but returned no query id to poll. "
+                            f"Submit response: {str(body)[:200]!r}")
     deadline = time.monotonic() + QUERY_TIMEOUT
     while not _query_finished(body):
-        if not query_id or time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             raise RamError(504, f"RAM did not answer within {int(QUERY_TIMEOUT)}s. "
                                 "The query may still be running — reopen this conversation "
                                 "in a moment, or raise RAM_QUERY_TIMEOUT.")
         await asyncio.sleep(QUERY_POLL_INTERVAL)
         body = await _fetch_query(query_id)
     return _normalize_query(body)
+
+
+def _extract_query_id(body: dict | None, resp: httpx.Response | None) -> str | None:
+    """An async submit may return the query object, a bare id, or just a
+    Location header pointing at the created query — accept any of them."""
+    if isinstance(body, dict):
+        for key in ("id", "queryId"):
+            if body.get(key):
+                return str(body[key])
+        items = body.get("items")
+        if isinstance(items, list) and items and isinstance(items[0], dict) and items[0].get("id"):
+            return str(items[0]["id"])
+    if isinstance(body, str) and body.strip():
+        return body.strip()
+    if resp is not None:
+        location = resp.headers.get("location") or resp.headers.get("content-location") or ""
+        if location:
+            return location.rstrip("/").rsplit("/", 1)[-1].split("?")[0] or None
+    return None
 
 
 def _query_finished(q: dict | None) -> bool:
