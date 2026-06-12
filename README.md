@@ -1,9 +1,11 @@
-# SAS RAM Chat UI
+# SAS Retrieval Agent Assistant
 
-A custom chatbot UI for **SAS Retrieval Agent Manager (RAM)**, styled identically to the
-Health repository's Population Health AI assistant. Pick a published agent (or query a
-collection directly) from the dropdown in the chat header and converse with it — answers,
-retrieved source passages, agent tool calls, and token usage all come from the RAM REST API.
+A custom chatbot UI for **SAS Retrieval Agent Manager (RAM)**, themed for SAS
+and styled identically to the reports repository's Smart Monitoring Assistant (glass panels,
+atmospheric bokeh backdrop, Manrope type — re-skinned in SAS blue #0072CE). Pick a published
+agent (or query a collection directly) from the dropdown in the chat header and converse with
+it — answers, retrieved source passages, agent tool calls, and token usage all come from the
+RAM REST API.
 
 ## What it does
 
@@ -24,7 +26,7 @@ retrieved source passages, agent tool calls, and token usage all come from the R
 ## Architecture
 
 ```
-Browser (React + Vite + Tailwind — same look as Health repo)
+Browser (React + Vite + Tailwind — same look as the reports chatbot, SAS theme)
    │  /api/*  (same-origin in prod, Vite proxy in dev)
    ▼
 FastAPI backend (token management + thin proxy)
@@ -49,17 +51,34 @@ npm run dev          # http://localhost:5173, proxies /api to :8000
 
 ## Connecting to a real RAM deployment
 
-Copy `backend/.env.example` to `backend/.env` and set:
+### Standalone RAM (Keycloak auth) — zero configuration
+
+Copy `backend/.env.example` to `backend/.env` and set just:
+
+```bash
+RAM_API_URL=https://<ram-host>/SASRetrievalAgentManager/api/v1
+RAM_VERIFY_SSL=false   # only if the cert is self-signed
+```
+
+Start the app and click **Sign in** in the header. The app runs the OAuth
+device code flow (with PKCE) against RAM's pre-configured public client
+(`sas-ram-api`): it shows a short code, you open the verification page, log in
+with your RAM user, and enter the code. The backend keeps the session alive
+with the refresh token. Override `RAM_CLIENT_ID` / `RAM_REALM` if your
+deployment differs from the defaults (`sas-ram-api` / `sas-iot`).
+
+### Full SAS Viya, or non-interactive auth
 
 | Variable | Purpose |
 |---|---|
-| `RAM_API_URL` | `https://<viya-host>/SASRetrievalAgentManager/api/v1` |
-| `RAM_TOKEN` | Option A: a static bearer token from SASLogon (quick demos) |
+| `RAM_API_URL` | `https://<host>/SASRetrievalAgentManager/api/v1` |
+| `RAM_TOKEN` | Option A: a static bearer token (quick demos) |
 | `SAS_CLIENT_ID` / `SAS_CLIENT_SECRET` | Option B: OAuth client — backend fetches & refreshes tokens itself |
 | `SAS_USERNAME` / `SAS_PASSWORD` | Optional: use the password grant to act as a named user |
-| `RAM_VERIFY_SSL` | `false` for self-signed Viya certificates |
+| `SAS_LOGON_URL` | Token endpoint — defaults to Viya's SASLogon; for standalone RAM use the Keycloak realm's token endpoint |
+| `RAM_VERIFY_SSL` | `false` for self-signed certificates |
 
-Getting a quick token for option A:
+Getting a quick token for option A on full Viya:
 
 ```bash
 curl -k https://<viya-host>/SASLogon/oauth/token \
