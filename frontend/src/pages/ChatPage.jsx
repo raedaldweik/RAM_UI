@@ -83,7 +83,7 @@ export default function ChatPage() {
     try {
       const res = await sendQuery(q, target, activeChat?.sessionId || null,
         attached ? [{ name: attached.name, text: attached.text }] : null);
-      if (res.querySessionId) setChatSession(activeChatId, res.querySessionId);
+      if (res.querySessionId) setChatSession(activeChatId, res.querySessionId, target);
       if (res.errorCode && res.errorCode !== 0) {
         addMessage(activeChatId, { role: 'assistant', type: 'text', content: `RAM error: ${res.errorText || 'query failed'}`, isError: true });
       } else {
@@ -99,6 +99,26 @@ export default function ChatPage() {
   const startRename = (chat) => { setRenamingChat(chat.id); setRenameValue(chat.title); setChatMenu(null); };
   const finishRename = (id) => { if (renameValue.trim()) renameChat(id, renameValue.trim()); setRenamingChat(null); };
 
+  // Scope "Recent conversations" to the selected agent/collection. Chats with
+  // no recorded target (brand-new local ones, or sessions RAM couldn't
+  // attribute) stay visible everywhere.
+  const visibleChats = chats.filter(chat => {
+    if (!target) return true;
+    const tagged = chat.agentId || (chat.collectionIds && chat.collectionIds.length > 0);
+    if (!tagged) return true;
+    return target.type === 'agent'
+      ? chat.agentId === target.id
+      : (chat.collectionIds || []).includes(target.id);
+  });
+
+  // When the target changes, don't leave an out-of-scope conversation open
+  useEffect(() => {
+    if (!target || visibleChats.some(c => c.id === activeChatId)) return;
+    if (visibleChats.length > 0) setActiveChatId(visibleChats[0].id);
+    else createNewChat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
+
   return (
     <div className="h-full flex gap-4 p-4">
 
@@ -108,7 +128,7 @@ export default function ChatPage() {
           <p className="panel-title">Recent conversations</p>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {chats.map(chat => {
+          {visibleChats.map(chat => {
             const isRenaming = renamingChat === chat.id;
             const menuOpen = chatMenu === chat.id;
             return (

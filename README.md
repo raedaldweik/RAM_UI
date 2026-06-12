@@ -15,7 +15,8 @@ RAM REST API.
   (`querySessionId`), so the agent keeps conversational context across turns.
 - **Persistent history** — past query sessions are loaded from RAM
   (`GET /querySessions`) into the "Recent conversations" panel and their messages are
-  rebuilt on click (`GET /query?filter=eq(querySessionId,'…')`).
+  rebuilt on click (`GET /query?filter=eq(querySessionId,'…')`). The panel is scoped to
+  the agent/collection selected in the dropdown, so you only see that target's history.
 - **Grounding transparency** — retrieved context passages render as clickable source
   chips, agent tool calls show in a collapsible trace, and token usage/cost appears
   under each answer.
@@ -105,7 +106,8 @@ Based on the v1 OpenAPI spec:
 - Multi-turn conversations via `querySessionId`
 - Listing/reloading past sessions and their full Q&A history
 - Inspecting retrieved context, tool calls, LLM calls, and per-query token usage/cost
-- Async queries (`synchronous=false`) — submit then poll `GET /query` by id
+- Async queries (`synchronous=false`) — this UI always submits asynchronously and polls,
+  so slow agent runs can't be killed by gateway timeouts (tune with `RAM_QUERY_TIMEOUT`)
 - Source/file management (upload files, tags, trigger re-indexing) — API exists, not surfaced in this UI
 
 **Not possible with the current API**

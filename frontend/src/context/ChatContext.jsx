@@ -39,7 +39,11 @@ export function ChatProvider({ children }) {
         const known = new Set(prev.map(c => c.sessionId).filter(Boolean));
         const stubs = sessions
           .filter(s => s.id && !known.has(s.id))
-          .map(s => ({ id: id(), sessionId: s.id, title: s.title || 'Conversation', messages: [WELCOME], loaded: false }));
+          .map(s => ({
+            id: id(), sessionId: s.id, title: s.title || 'Conversation', messages: [WELCOME], loaded: false,
+            // which agent/collections this session talked to (for sidebar scoping)
+            agentId: s.agentId || null, collectionIds: s.collectionIds || [],
+          }));
         return [...prev, ...stubs];
       });
     }).catch(() => {});
@@ -74,9 +78,17 @@ export function ChatProvider({ children }) {
     }));
   }, []);
 
-  // Record the querySessionId RAM assigned on the first reply
-  const setChatSession = useCallback((chatId, sessionId) => {
-    setChats(p => p.map(c => c.id === chatId && !c.sessionId ? { ...c, sessionId } : c));
+  // Record the querySessionId RAM assigned on the first reply, plus the
+  // target it was created against so the sidebar can scope by agent/collection
+  const setChatSession = useCallback((chatId, sessionId, target = null) => {
+    setChats(p => p.map(c => {
+      if (c.id !== chatId || c.sessionId) return c;
+      return {
+        ...c, sessionId,
+        agentId: target?.type === 'agent' ? target.id : c.agentId || null,
+        collectionIds: target?.type === 'collection' ? [target.id] : c.collectionIds || [],
+      };
+    }));
   }, []);
 
   const renameChat = useCallback((chatId, newTitle) => {

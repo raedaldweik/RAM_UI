@@ -25,6 +25,7 @@ Other env vars:
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import os
@@ -39,7 +40,13 @@ RAM_API_URL = os.getenv("RAM_API_URL", "").rstrip("/")
 VERIFY_SSL = os.getenv("RAM_VERIFY_SSL", "true").lower() != "false"
 MOCK = os.getenv("RAM_MOCK", "").lower() == "true"
 
-TIMEOUT = httpx.Timeout(10.0, read=180.0)  # RAM queries can take a while
+TIMEOUT = httpx.Timeout(10.0, read=180.0)
+
+# Queries are submitted asynchronously (synchronous=false) and polled, so no
+# single HTTP request to RAM outlives its gateway's timeout. These bound the
+# overall wait for an answer and the poll cadence.
+QUERY_TIMEOUT = float(os.getenv("RAM_QUERY_TIMEOUT", "600"))
+QUERY_POLL_INTERVAL = float(os.getenv("RAM_QUERY_POLL_INTERVAL", "2"))
 
 
 class RamError(Exception):
@@ -303,7 +310,26 @@ async def list_collections() -> list[dict]:
 
 async def list_sessions() -> list[dict]:
     body = await _request("GET", "/querySessions", params={"limit": 100, "sortBy": "updateTimestamp:descending"})
-    return body.get("items") or []
+    sessions = body.get("items") or []
+    # Annotate each session with the agent/collections its queries targeted so
+    # the UI can scope "Recent conversations" to the selected target. Sessions
+    # don't carry this themselves, so derive it from the query records.
+    targets: dict[str, dict] = {}
+    try:
+        qbody = await _request("GET", "/query", params={"limit": 1000})
+        for q in qbody.get("items") or []:
+            sid = q.get("querySessionId")
+            if not sid or sid in targets:
+                continue
+            tid = q.get("targetId") or {}
+            targets[sid] = {
+                "target": q.get("target"),
+                "agentId": tid.get("agentId"),
+                "collectionIds": tid.get("configurationIds") or tid.get("collectionIds") or [],
+            }
+    except RamError:
+        pass  # best-effort: an unannotated history is better than no history
+    return [{**s, **targets.get(s.get("id"), {})} for s in sessions]
 
 
 async def list_session_queries(session_id: str) -> list[dict]:
@@ -325,8 +351,45 @@ async def create_query(content: str, *, agent_id: str | None = None,
     if session_id:
         payload["querySessionId"] = session_id
 
-    body = await _request("POST", "/query", params={"synchronous": "true", "persistent": "true"}, json=payload)
+    # Submit asynchronously and poll: a synchronous POST /query holds one HTTP
+    # request open for the whole agent run, which gateways in front of RAM kill
+    # with "504 upstream request timeout" on slow queries.
+    body = await _request("POST", "/query", params={"synchronous": "false", "persistent": "true"}, json=payload)
+    query_id = (body or {}).get("id")
+    deadline = time.monotonic() + QUERY_TIMEOUT
+    while not _query_finished(body):
+        if not query_id or time.monotonic() >= deadline:
+            raise RamError(504, f"RAM did not answer within {int(QUERY_TIMEOUT)}s. "
+                                "The query may still be running — reopen this conversation "
+                                "in a moment, or raise RAM_QUERY_TIMEOUT.")
+        await asyncio.sleep(QUERY_POLL_INTERVAL)
+        body = await _fetch_query(query_id)
     return _normalize_query(body)
+
+
+def _query_finished(q: dict | None) -> bool:
+    if not q:
+        return False
+    state = str(q.get("state") or "").lower()
+    if state in ("completed", "failed", "error", "canceled", "cancelled", "timedout", "timed_out"):
+        return True
+    if q.get("errorCode") or q.get("errorText"):
+        return True
+    return (q.get("response") or {}).get("answer") is not None
+
+
+async def _fetch_query(query_id: str) -> dict:
+    """Fetch a single query record, falling back to a filtered collection GET
+    for RAM versions without an item endpoint."""
+    try:
+        return await _request("GET", f"/query/{query_id}")
+    except RamError as e:
+        if e.status in (400, 404, 405):
+            body = await _request("GET", "/query", params={"filter": f"eq(id,'{query_id}')", "limit": 1})
+            items = body.get("items") or []
+            if items:
+                return items[0]
+        raise
 
 
 def _normalize_query(q: dict) -> dict:
@@ -415,9 +478,12 @@ async def _mock_request(method: str, path: str, *, params: dict | None = None, j
                 "count": len(items)}
     if path == "/query" and method == "GET":
         filt = params.get("filter", "")
-        sid = filt.split("'")[1] if "'" in filt else ""
-        session = _mock_sessions.get(sid, {"queries": []})
-        return {"items": session["queries"], "count": len(session["queries"])}
+        if "'" in filt:
+            sid = filt.split("'")[1]
+            session = _mock_sessions.get(sid, {"queries": []})
+            return {"items": session["queries"], "count": len(session["queries"])}
+        queries = [q for s in _mock_sessions.values() for q in s["queries"]]
+        return {"items": queries, "count": len(queries)}
     if path == "/query" and method == "POST":
         now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         sid = (json or {}).get("querySessionId") or str(uuid.uuid4())
