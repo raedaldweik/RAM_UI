@@ -319,20 +319,31 @@ async def list_sessions() -> list[dict]:
     # don't carry this themselves, so derive it from the query records.
     targets: dict[str, dict] = {}
     try:
-        qbody = await _request("GET", "/query", params={"limit": 1000})
-        for q in qbody.get("items") or []:
-            sid = q.get("querySessionId")
-            if not sid or sid in targets:
-                continue
-            tid = q.get("targetId") or {}
-            targets[sid] = {
-                "target": q.get("target"),
-                "agentId": tid.get("agentId"),
-                "collectionIds": tid.get("configurationIds") or tid.get("collectionIds") or [],
-            }
+        # GET /query caps limit at 100 — page through (bounded) to cover history
+        for start in range(0, 1000, 100):
+            qbody = await _request("GET", "/query", params={"limit": 100, "start": start})
+            items = qbody.get("items") or []
+            for q in items:
+                sid = q.get("querySessionId")
+                if not sid or sid in targets:
+                    continue
+                targets[sid] = {"target": q.get("target"), **_target_ids(q)}
+            if len(items) < 100:
+                break
     except RamError:
         pass  # best-effort: an unannotated history is better than no history
     return [{**s, **targets.get(s.get("id"), {})} for s in sessions]
+
+
+def _target_ids(q: dict) -> dict:
+    """targetId comes back as e.g. {"agentId": …} or {"configurationIds": […]},
+    with snake_case variants in some responses."""
+    tid = q.get("targetId") or {}
+    return {
+        "agentId": tid.get("agentId") or tid.get("agent_id"),
+        "collectionIds": (tid.get("configurationIds") or tid.get("configuration_ids")
+                          or tid.get("collectionIds") or tid.get("collection_ids") or []),
+    }
 
 
 async def list_session_queries(session_id: str) -> list[dict]:
@@ -394,28 +405,21 @@ def _extract_query_id(body: dict | None, resp: httpx.Response | None) -> str | N
 
 
 def _query_finished(q: dict | None) -> bool:
+    """A pending async query has errorCode 0 and a null response; it's done
+    once RAM writes a response object or a nonzero errorCode."""
     if not q:
         return False
-    state = str(q.get("state") or "").lower()
-    if state in ("completed", "failed", "error", "canceled", "cancelled", "timedout", "timed_out"):
-        return True
     if q.get("errorCode") or q.get("errorText"):
         return True
-    return (q.get("response") or {}).get("answer") is not None
+    return q.get("response") is not None
 
 
-async def _fetch_query(query_id: str) -> dict:
-    """Fetch a single query record, falling back to a filtered collection GET
-    for RAM versions without an item endpoint."""
-    try:
-        return await _request("GET", f"/query/{query_id}")
-    except RamError as e:
-        if e.status in (400, 404, 405):
-            body = await _request("GET", "/query", params={"filter": f"eq(id,'{query_id}')", "limit": 1})
-            items = body.get("items") or []
-            if items:
-                return items[0]
-        raise
+async def _fetch_query(query_id: str) -> dict | None:
+    """Fetch a single query record. There is no GET /query/{id} item endpoint
+    in the v1 API — use the collection endpoint's id filter."""
+    body = await _request("GET", "/query", params={"filter": f"eq(id,'{query_id}')", "limit": 1})
+    items = body.get("items") or []
+    return items[0] if items else None
 
 
 def _normalize_query(q: dict) -> dict:
