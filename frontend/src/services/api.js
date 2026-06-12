@@ -38,7 +38,9 @@ export const getSessionQueries = (sessionId) =>
 
 // target: { type: 'agent', id } or { type: 'collection', id }
 // attachments: [{ name, text }] — extracted documents inlined into the query
-export const sendQuery = (content, target, querySessionId = null, attachments = null) =>
+// Returns { queryId, querySessionId, pollInterval, timeout, result? } —
+// poll getQueryStatus until done unless `result` came back inline.
+export const submitQuery = (content, target, querySessionId = null, attachments = null) =>
   req('/api/query', {
     method: 'POST',
     body: JSON.stringify({
@@ -49,3 +51,8 @@ export const sendQuery = (content, target, querySessionId = null, attachments = 
       attachments,
     }),
   });
+
+export const getQueryStatus = (queryId) => req(`/api/query/${encodeURIComponent(queryId)}`);
+
+// Tool/LLM/retrieval calls RAM recorded for a query — also works mid-run
+export const getQueryTrace = (queryId) => req(`/api/query/${encodeURIComponent(queryId)}/trace`);

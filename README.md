@@ -20,6 +20,15 @@ RAM REST API.
 - **Grounding transparency** — retrieved context passages render as clickable source
   chips, agent tool calls show in a collapsible trace, and token usage/cost appears
   under each answer.
+- **Full traceability** — a details-view icon under each answer opens a popup with
+  the complete trace: tool calls with inputs/outputs (`GET /toolCalls`), LLM calls
+  with prompts, models, and token costs (`GET /llmCalls`), retrieval/RAG calls
+  (`GET /retrievalCalls`), and the retrieved passages — all filtered by
+  `parentQueryId`, same data as RAM's own details view.
+- **Live agent activity** — while a query runs, the typing indicator lists the
+  tool/LLM/retrieval calls RAM has recorded so far (the trace endpoints are polled
+  alongside the result), so long-running agent queries show what's happening
+  instead of just a spinner.
 - **Server-side auth** — the FastAPI backend holds the SAS Viya bearer token (static or
   auto-refreshed via SASLogon OAuth) and proxies all RAM calls, so the token never
   reaches the browser and CORS is a non-issue.

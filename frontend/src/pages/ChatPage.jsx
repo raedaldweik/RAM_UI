@@ -2,15 +2,30 @@ import { useState, useRef, useEffect } from 'react';
 import { useChat } from '../context/ChatContext';
 import ResponseCard from '../components/ResponseCard';
 import SourceViewer from '../components/SourceViewer';
+import QueryDetails from '../components/QueryDetails';
 import TargetSelector from '../components/TargetSelector';
 import VoiceInput from '../components/VoiceInput';
-import { getAgents, getCollections, sendQuery, extractAttachment } from '../services/api';
+import { getAgents, getCollections, submitQuery, getQueryStatus, getQueryTrace, extractAttachment } from '../services/api';
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Flatten a trace into display steps for the live activity indicator
+function traceSteps(trace) {
+  if (!trace) return [];
+  return [
+    ...(trace.toolCalls || []).map(c => ({ key: `t-${c.id}`, icon: '🛠', label: c.toolName || 'tool call' })),
+    ...(trace.retrievalCalls || []).map(c => ({ key: `r-${c.id}`, icon: '📚', label: 'retrieving documents' })),
+    ...(trace.llmCalls || []).map(c => ({ key: `l-${c.id}`, icon: '✦', label: c.input?.modelName ? `LLM · ${c.input.modelName}` : 'LLM call' })),
+  ];
+}
 
 export default function ChatPage() {
   const { chats, activeChat, activeChatId, setActiveChatId, addMessage, setChatSession, renameChat, deleteChat, createNewChat } = useChat();
   const messages = activeChat?.messages || [];
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [liveTrace, setLiveTrace] = useState(null);   // tool/LLM/RAG calls while a query runs
+  const [details, setDetails] = useState(null);       // { data, query } for the details popup
   const [source, setSource] = useState(null);
   const [chatMenu, setChatMenu] = useState(null);
   const [renamingChat, setRenamingChat] = useState(null);
@@ -80,10 +95,28 @@ export default function ChatPage() {
     setAttachError(null);
     addMessage(activeChatId, { role: 'user', type: 'text', content: q, attachmentName: attached?.name });
     setLoading(true);
+    setLiveTrace(null);
     try {
-      const res = await sendQuery(q, target, activeChat?.sessionId || null,
+      const sub = await submitQuery(q, target, activeChat?.sessionId || null,
         attached ? [{ name: attached.name, text: attached.text }] : null);
-      if (res.querySessionId) setChatSession(activeChatId, res.querySessionId, target);
+      if (sub.querySessionId) setChatSession(activeChatId, sub.querySessionId, target);
+
+      let res = sub.result;
+      if (!res) {
+        // Poll for the result; in parallel, surface the tool/LLM/retrieval
+        // calls RAM has recorded so far as live activity under the indicator.
+        const interval = Math.max((sub.pollInterval || 2) * 1000, 1000);
+        const deadline = Date.now() + (sub.timeout || 600) * 1000;
+        for (;;) {
+          await sleep(interval);
+          getQueryTrace(sub.queryId).then(setLiveTrace).catch(() => {});
+          const st = await getQueryStatus(sub.queryId);
+          if (st.done) { res = st.result; break; }
+          if (Date.now() >= deadline)
+            throw new Error(`RAM did not answer within ${sub.timeout || 600}s — the query may still be running on the server.`);
+        }
+      }
+
       if (res.errorCode && res.errorCode !== 0) {
         addMessage(activeChatId, { role: 'assistant', type: 'text', content: `RAM error: ${res.errorText || 'query failed'}`, isError: true });
       } else {
@@ -93,6 +126,7 @@ export default function ChatPage() {
       addMessage(activeChatId, { role: 'assistant', type: 'text', content: `Error: ${err.message}`, isError: true });
     }
     setLoading(false);
+    setLiveTrace(null);
     inputRef.current?.focus();
   };
 
@@ -224,7 +258,8 @@ export default function ChatPage() {
               {/* Bubble */}
               <div className="max-w-[70%]">
                 {msg.type === 'structured' ? (
-                  <ResponseCard data={msg.data} onOpenSource={(doc) => setSource(doc)} />
+                  <ResponseCard data={msg.data} onOpenSource={(doc) => setSource(doc)}
+                    onOpenDetails={(d) => setDetails({ data: d, query: msg.query })} />
                 ) : (
                   <div className={`px-4 py-3 text-[13px] leading-[1.75] ${
                     msg.role === 'user' ? 'msg-user-bubble' : 'msg-bot-bubble'
@@ -246,22 +281,47 @@ export default function ChatPage() {
             </div>
           ))}
 
-          {loading && (
-            <div className="flex gap-2.5 animate-fade-up">
-              <div className="w-8 h-8 rounded-lg shrink-0 flex items-center justify-center p-1"
-                style={{ background: 'var(--nav-grad)', border: '1px solid rgba(59,155,232,0.3)' }}>
-                <img src="/sas_logo.png" alt="Assistant" className="w-full h-full object-contain" />
-              </div>
-              <div className="msg-bot-bubble px-4 py-3">
-                <div className="flex gap-1.5">
-                  {[0, 1, 2].map(j => (
-                    <span key={j} className="w-1.5 h-1.5 rounded-full"
-                      style={{ background: 'var(--gold)', opacity: 0.3, animation: `pop 1.4s ease-in-out infinite ${j * 0.15}s` }} />
-                  ))}
+          {loading && (() => {
+            const steps = traceSteps(liveTrace);
+            return (
+              <div className="flex gap-2.5 animate-fade-up">
+                <div className="w-8 h-8 rounded-lg shrink-0 flex items-center justify-center p-1"
+                  style={{ background: 'var(--nav-grad)', border: '1px solid rgba(59,155,232,0.3)' }}>
+                  <img src="/sas_logo.png" alt="Assistant" className="w-full h-full object-contain" />
+                </div>
+                <div className="msg-bot-bubble px-4 py-3 min-w-[180px]">
+                  {/* Live agent activity — tool/LLM/RAG calls recorded so far */}
+                  {steps.length > 0 && (
+                    <div className="mb-2.5 space-y-1.5">
+                      {steps.slice(-6).map((s, i, arr) => (
+                        <div key={s.key} className="flex items-center gap-2 text-[11.5px] animate-fade-up"
+                          style={{ color: i === arr.length - 1 ? 'var(--gold-lo)' : 'var(--text-dim)' }}>
+                          <span className="text-[10px] w-4 text-center shrink-0">{s.icon}</span>
+                          <span className="truncate font-medium">{s.label}</span>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="3" className="shrink-0 ml-auto">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <div className="flex gap-1.5">
+                      {[0, 1, 2].map(j => (
+                        <span key={j} className="w-1.5 h-1.5 rounded-full"
+                          style={{ background: 'var(--gold)', opacity: 0.3, animation: `pop 1.4s ease-in-out infinite ${j * 0.15}s` }} />
+                      ))}
+                    </div>
+                    {steps.length > 0 && (
+                      <span className="text-[10px]" style={{ color: 'var(--text-faint)' }}>
+                        {steps.length} step{steps.length !== 1 ? 's' : ''} so far
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
           <div ref={endRef} />
         </div>
 
@@ -333,6 +393,11 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {details && (
+        <QueryDetails data={details.data} query={details.query}
+          onClose={() => setDetails(null)}
+          onOpenSource={(doc) => setSource(doc)} />
+      )}
       {source && <SourceViewer source={source} onClose={() => setSource(null)} />}
     </div>
   );

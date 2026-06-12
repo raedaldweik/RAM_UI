@@ -352,7 +352,7 @@ async def list_session_queries(session_id: str) -> list[dict]:
     return [_normalize_query(q) for q in items]
 
 
-async def create_query(content: str, *, agent_id: str | None = None,
+async def submit_query(content: str, *, agent_id: str | None = None,
                        collection_ids: list[str] | None = None,
                        session_id: str | None = None) -> dict:
     payload: dict[str, Any] = {"content": content}
@@ -365,24 +365,51 @@ async def create_query(content: str, *, agent_id: str | None = None,
     if session_id:
         payload["querySessionId"] = session_id
 
-    # Submit asynchronously and poll: a synchronous POST /query holds one HTTP
-    # request open for the whole agent run, which gateways in front of RAM kill
-    # with "504 upstream request timeout" on slow queries.
+    # Submit asynchronously: a synchronous POST /query holds one HTTP request
+    # open for the whole agent run, which gateways in front of RAM kill with
+    # "504 upstream request timeout" on slow queries. The frontend polls
+    # /api/query/{id} for the result and /api/query/{id}/trace for live
+    # tool/LLM/retrieval activity while it runs.
     body, resp = await _request("POST", "/query", params={"synchronous": "false", "persistent": "true"},
                                 json=payload, with_response=True)
-    query_id = _extract_query_id(body, resp)
-    if not query_id and not _query_finished(body):
+    out = {
+        "queryId": _extract_query_id(body, resp),
+        "querySessionId": (body or {}).get("querySessionId") or session_id,
+        "pollInterval": QUERY_POLL_INTERVAL,
+        "timeout": QUERY_TIMEOUT,
+    }
+    if _query_finished(body):  # the mock (and a sync-answering RAM) returns the result inline
+        out["result"] = _normalize_query(body)
+    elif not out["queryId"]:
         raise RamError(502, "RAM accepted the query but returned no query id to poll. "
                             f"Submit response: {str(body)[:200]!r}")
-    deadline = time.monotonic() + QUERY_TIMEOUT
-    while not _query_finished(body):
-        if time.monotonic() >= deadline:
-            raise RamError(504, f"RAM did not answer within {int(QUERY_TIMEOUT)}s. "
-                                "The query may still be running — reopen this conversation "
-                                "in a moment, or raise RAM_QUERY_TIMEOUT.")
-        await asyncio.sleep(QUERY_POLL_INTERVAL)
-        body = await _fetch_query(query_id)
-    return _normalize_query(body)
+    return out
+
+
+async def query_status(query_id: str) -> dict:
+    q = await _fetch_query(query_id)
+    if not _query_finished(q):
+        return {"done": False}
+    return {"done": True, "result": _normalize_query(q)}
+
+
+async def query_trace(query_id: str) -> dict:
+    """The tool, LLM, and retrieval calls RAM recorded for a query — each is a
+    separate resource filterable by parentQueryId, so this also works while
+    the query is still running (calls appear as RAM persists them)."""
+    flt = f"eq(parentQueryId,'{query_id}')"
+    results = await asyncio.gather(
+        _request("GET", "/toolCalls", params={"filter": flt, "limit": 100}),
+        _request("GET", "/llmCalls", params={"filter": flt, "limit": 100}),
+        _request("GET", "/retrievalCalls", params={"filter": flt, "limit": 100}),
+        return_exceptions=True,
+    )
+
+    def _items(r: Any) -> list:
+        return [] if isinstance(r, BaseException) or not r else (r.get("items") or [])
+
+    return {"toolCalls": _items(results[0]), "llmCalls": _items(results[1]),
+            "retrievalCalls": _items(results[2])}
 
 
 def _extract_query_id(body: dict | None, resp: httpx.Response | None) -> str | None:
@@ -494,6 +521,7 @@ _MOCK_COLLECTIONS = [
      "description": "HR and travel policy PDFs."},
 ]
 _mock_sessions: dict[str, dict] = {}
+_mock_traces: dict[str, dict] = {}  # queryId → {"/toolCalls": [...], "/llmCalls": [...], "/retrievalCalls": [...]}
 
 
 async def _mock_request(method: str, path: str, *, params: dict | None = None, json: dict | None = None) -> Any:
@@ -545,5 +573,26 @@ async def _mock_request(method: str, path: str, *, params: dict | None = None, j
             },
         }
         session["queries"].append(query)
+        _mock_traces[query["id"]] = {
+            "/toolCalls": [{
+                "id": str(uuid.uuid4()), "parentQueryId": query["id"], "toolName": "retrieve_documents",
+                "input": {"query": json["content"]},
+                "output": {"content": ["Found 1 matching document."], "isError": False}, "cost": 0,
+            }],
+            "/llmCalls": [{
+                "id": str(uuid.uuid4()), "parentQueryId": query["id"], "llmId": "mock-llm",
+                "input": {"content": json["content"], "modelName": "gpt-4o", "modelProvider": "azure", "temperature": 0.7},
+                "output": {"response": query["response"]["answer"], "toolCalls": []},
+                "promptTokens": 220, "completionTokens": 96, "promptCost": 0.0008, "completionCost": 0.0006,
+            }],
+            "/retrievalCalls": [{
+                "id": str(uuid.uuid4()), "parentQueryId": query["id"],
+                "input": {"query": json["content"], "k": 4}, "output": {"documents": 1},
+            }],
+        }
         return query
+    if path in ("/toolCalls", "/llmCalls", "/retrievalCalls") and method == "GET":
+        filt = params.get("filter", "")
+        qid = filt.split("'")[1] if "'" in filt else ""
+        return {"items": _mock_traces.get(qid, {}).get(path, [])}
     raise RamError(404, f"Mock has no handler for {method} {path}")

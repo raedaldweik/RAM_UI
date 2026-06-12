@@ -133,6 +133,9 @@ async def session_queries(session_id: str):
 
 @router.post("/query")
 async def query(body: QueryRequest):
+    """Submit a query asynchronously. Returns {queryId, querySessionId,
+    pollInterval, timeout} — poll GET /api/query/{queryId} for the result
+    (a `result` key is included directly when RAM answered inline)."""
     if not body.content.strip():
         raise HTTPException(status_code=400, detail="Empty query.")
     content = body.content
@@ -140,9 +143,19 @@ async def query(body: QueryRequest):
         for a in body.attachments:
             content += f"\n\n--- Attached document: {a.name} ---\n{a.text[:MAX_ATTACH_CHARS]}\n--- End of attached document ---"
         content += "\n\nUse the attached document content above to answer the question where relevant."
-    return await _wrap(ram.create_query(
+    return await _wrap(ram.submit_query(
         content,
         agent_id=body.agentId,
         collection_ids=body.collectionIds,
         session_id=body.querySessionId,
     ))
+
+
+@router.get("/query/{query_id}")
+async def query_status(query_id: str):
+    return await _wrap(ram.query_status(query_id))
+
+
+@router.get("/query/{query_id}/trace")
+async def query_trace(query_id: str):
+    return await _wrap(ram.query_trace(query_id))

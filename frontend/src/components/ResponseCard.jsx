@@ -32,7 +32,7 @@ const markdownComponents = {
 };
 
 /** Renders one normalized RAM query response: answer, sources, tool calls, usage. */
-export default function ResponseCard({ data, onOpenSource }) {
+export default function ResponseCard({ data, onOpenSource, onOpenDetails }) {
   if (!data) return null;
   const usage = data.usage || {};
   const hasUsage = usage.llmTotalTokens != null || usage.llmTotalCost != null;
@@ -67,14 +67,26 @@ export default function ResponseCard({ data, onOpenSource }) {
 
       <ToolCallTrace toolCalls={data.toolCalls} />
 
-      {/* Usage footer */}
-      {hasUsage && (
-        <div className="flex items-center gap-3 px-1 text-[10px]" style={{ color: 'var(--text-faint)' }}>
-          {usage.llmTotalTokens != null && <span>{usage.llmTotalTokens.toLocaleString()} tokens</span>}
-          {usage.llmPromptTokens != null && <span>{usage.llmPromptTokens.toLocaleString()} prompt · {usage.llmCompletionTokens?.toLocaleString() ?? 0} completion</span>}
-          {usage.llmTotalCost != null && <span>${Number(usage.llmTotalCost).toFixed(4)}</span>}
-        </div>
-      )}
+      {/* Usage footer + details view */}
+      <div className="flex items-center gap-3 px-1 text-[10px]" style={{ color: 'var(--text-faint)' }}>
+        {onOpenDetails && (
+          <button onClick={() => onOpenDetails(data)} title="Details view — tools, LLM calls, retrieval trace"
+            className="p-1 rounded-md transition-all hover:bg-[rgba(0,114,206,0.10)]"
+            style={{ color: 'var(--text-dim)' }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+              <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+            </svg>
+          </button>
+        )}
+        {hasUsage && (
+          <>
+            {usage.llmTotalTokens != null && <span>{usage.llmTotalTokens.toLocaleString()} tokens</span>}
+            {usage.llmPromptTokens != null && <span>{usage.llmPromptTokens.toLocaleString()} prompt · {usage.llmCompletionTokens?.toLocaleString() ?? 0} completion</span>}
+            {usage.llmTotalCost != null && <span>${Number(usage.llmTotalCost).toFixed(4)}</span>}
+          </>
+        )}
+      </div>
     </div>
   );
 }
