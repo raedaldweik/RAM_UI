@@ -32,6 +32,10 @@ RAM REST API.
 - **Server-side auth** — the FastAPI backend holds the SAS Viya bearer token (static or
   auto-refreshed via SASLogon OAuth) and proxies all RAM calls, so the token never
   reaches the browser and CORS is a non-issue.
+- **Interactive maps (TomTom agent)** — when an agent calls the TomTom MCP's
+  `tomtom-render-map` tool, the answer renders a pretty, SAS-themed interactive map
+  (MapLibre GL) with routes, markers, traffic incidents, and isochrones — Dubai-
+  centered and UAE-bounded. See [`docs/tomtom-agent.md`](docs/tomtom-agent.md).
 
 ## Architecture
 
