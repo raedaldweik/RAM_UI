@@ -30,6 +30,7 @@ import base64
 import hashlib
 import os
 import secrets
+import ssl
 import time
 import uuid
 from typing import Any
@@ -41,6 +42,16 @@ VERIFY_SSL = os.getenv("RAM_VERIFY_SSL", "true").lower() != "false"
 MOCK = os.getenv("RAM_MOCK", "").lower() == "true"
 
 TIMEOUT = httpx.Timeout(10.0, read=180.0)
+
+# A fresh HTTPS connection (new TLS handshake) is opened per RAM call, so an
+# occasional handshake hiccup — a rejected TLS session resumption
+# ([SSL: INVALID_SESSION_ID]), a dropped keep-alive, or a brief network blip —
+# can fail an otherwise-healthy request. These all happen at connect time,
+# before any request bytes are sent, so retrying is safe even for a POST
+# (no risk of double-submitting a query).
+_CONNECT_RETRIES = 3            # total attempts on a transient connect/TLS failure
+_CONNECT_RETRY_BACKOFF = 0.4    # seconds, exponential (0.4s, 0.8s, …)
+_RETRYABLE_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, ssl.SSLError)
 
 # Queries are submitted asynchronously (synchronous=false) and polled, so no
 # single HTTP request to RAM outlives its gateway's timeout. These bound the
@@ -282,14 +293,22 @@ async def _request(method: str, path: str, *, params: dict | None = None, json: 
         raise RamError(500, "RAM_API_URL is not configured. Set it in backend/.env (see .env.example).")
 
     token = await _get_token()
-    async with httpx.AsyncClient(verify=VERIFY_SSL, timeout=TIMEOUT) as client:
-        r = await client.request(method, f"{RAM_API_URL}{path}", params=params, json=json,
-                                 headers={"Authorization": f"Bearer {token}"})
-        # One retry on 401 in case a cached OAuth token just expired
-        if r.status_code == 401 and not os.getenv("RAM_TOKEN"):
-            token = await _get_token(force_refresh=True)
-            r = await client.request(method, f"{RAM_API_URL}{path}", params=params, json=json,
-                                     headers={"Authorization": f"Bearer {token}"})
+    r = None
+    for attempt in range(_CONNECT_RETRIES):
+        try:
+            async with httpx.AsyncClient(verify=VERIFY_SSL, timeout=TIMEOUT) as client:
+                r = await client.request(method, f"{RAM_API_URL}{path}", params=params, json=json,
+                                         headers={"Authorization": f"Bearer {token}"})
+                # One retry on 401 in case a cached OAuth token just expired
+                if r.status_code == 401 and not os.getenv("RAM_TOKEN"):
+                    token = await _get_token(force_refresh=True)
+                    r = await client.request(method, f"{RAM_API_URL}{path}", params=params, json=json,
+                                             headers={"Authorization": f"Bearer {token}"})
+            break  # got a response (any status) — stop retrying
+        except _RETRYABLE_CONNECT_ERRORS:
+            if attempt == _CONNECT_RETRIES - 1:
+                raise
+            await asyncio.sleep(_CONNECT_RETRY_BACKOFF * (2 ** attempt))
     if r.status_code >= 400:
         try:
             message = r.json().get("message", r.text[:300])
